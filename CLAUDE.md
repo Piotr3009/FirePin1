@@ -23,8 +23,8 @@ Operatives see only their assigned pins, do the work, take photos, and update st
 
 ## Roles
 
-- **Admin**: creates projects, uploads drawings, creates pins, assigns pins to operatives, approves/rejects work, generates reports
-- **Operative**: sees only assigned pins, views system technical drawing, uploads completion photos, updates status
+- **Admin**: creates projects, uploads drawings, creates pins, assigns pins to operatives, prices pins, confirms operative-found pins, approves/rejects work, generates reports
+- **Operative**: sees only assigned pins, views system technical drawing, uploads completion photos, updates status. May ALSO create a pin for a penetration found on site that was not pre-planned — such a pin is created `confirmed = false` (shown PURPLE) and goes to the admin for review + pricing before it counts towards billing. Operatives can never self-confirm or self-approve.
 
 ## Build Commands
 
@@ -87,7 +87,7 @@ src/
 - `zones` - (id, floor_id, project_id, name)
 - `drawings` - PDF files per zone (id, project_id, zone_id, file_url)
 - `drawing_pages` - pages of PDF (id, drawing_id, page_number, preview_image_url, width_px, height_px)
-- `system_catalog` - fire stopping systems (id, manufacturer, system_reference, barrier_type, service_type, fire_rating_options[], technical_drawing_url, unit_price, pricing_method)
+- `system_catalog` - fire stopping systems (id, manufacturer, system_reference, barrier_type, service_type, fire_rating_options[], technical_drawing_url, instructions, is_active, dimension ranges: min/max_width_mm + min/max_height_mm + min/max_diameter_mm, pricing: pricing_method + unit_price + base_price + included_area_mm2 + included_length_mm + overage_unit_price)
 - `markers` - pins on drawing (see full schema below)
 - `marker_photos` - (id, marker_id, photo_url, photo_type: before|during|after|defect|extra)
 - `marker_history` - audit log per pin
@@ -105,11 +105,17 @@ markers (
   barrier_type: wall|floor|ceiling,
   service_type: cable|pipe|duct|mixed|other,
   penetration_type, opening_size, wall_thickness, wall_material,
+  width_mm, height_mm, diameter_mm, quantity,   -- numeric dims drive pricing + matching
   manufacturer, system_reference, system_catalog_id,
   fire_rating INTEGER,
   estimated_price NUMERIC,
+  system_snapshot_json JSONB,        -- frozen system details at fill-in time
+  price_calculation_json JSONB,      -- how the price was derived (auditable)
+  instruction_snapshot TEXT,         -- frozen installation instructions
   status: new|in_progress|needs_remedial|approved,
   compliance_status: compliant|incomplete|non_compliant,
+  confirmed BOOLEAN,                 -- false = operative-found, awaiting admin (PURPLE)
+  confirmed_by UUID, confirmed_at TIMESTAMPTZ,
   assigned_to UUID,
   installation_date,
   description TEXT,         -- AUTO-GENERATED from form data
@@ -120,10 +126,30 @@ markers (
 
 ## Pin Status & Colors
 
+- `confirmed = false` -> **Purple** (operative-found pin, awaiting admin review + pricing) — overrides status colour
 - `new` -> Grey
 - `in_progress` -> Blue
 - `needs_remedial` -> Amber/Yellow
 - `approved` -> Green
+
+Use the `pinColor(marker)` helper in `src/lib/types/index.ts`: purple if not confirmed, otherwise the status colour.
+
+## Pricing (6 models)
+
+Pricing lives in `src/lib/utils/priceCalc.ts` (`calculatePrice` / `priceForMarker`). Each system in the catalog has a `pricing_method`:
+
+- `per_unit` - flat price per pin (`unit_price`)
+- `quantity_based` - `unit_price × quantity`
+- `per_m2` - `unit_price` is £/m²; uses `width_mm × height_mm`
+- `per_metre` - `unit_price` is £/linear metre; uses `diameter_mm` (or longest side)
+- `base_plus_overage` - `base_price` + (area beyond `included_area_mm2`) × `overage_unit_price`
+- `manual_override` - admin types the price by hand
+
+System matching lives in `src/lib/utils/systemMatch.ts` (`matchSystems`): given barrier/service type, opening dimensions and fire rating, it returns the catalog systems that fit (best match first) so the form can suggest the right system.
+
+When a pin is filled in, snapshot the chosen system, the price calculation `basis`, and the installation instructions into `system_snapshot_json` / `price_calculation_json` / `instruction_snapshot` so later catalog edits never change historical pins.
+
+Marker numbering: call the DB function `next_marker_number(project_id)` (race-safe) instead of counting on the client.
 
 ## Critical Rules
 
